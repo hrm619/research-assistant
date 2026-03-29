@@ -1,0 +1,26 @@
+[project]
+name = "research-assistant"
+version = "0.1.0"
+description = "Research assistant that accelerates progression from domain curiosity to testable hypothesis"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "click",
+    "pydantic",
+    "pydantic-settings",
+    "anthropic",
+    "yt-dlp",
+    "pandas",
+    "numpy",
+    "openpyxl",
+    "requests",
+    "python-dotenv",
+    "pytest",
+]
+
+[project.scripts]
+ra = "research_assistant.cli:cli"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
