@@ -66,8 +66,9 @@ class TestExtractYoutube:
         assert "Hello world" in result.raw_text
         assert result.published_at is not None
 
+    @patch("yt_transcriber.pipeline.process_url_to_transcript", return_value="Whisper transcript text")
     @patch("yt_dlp.YoutubeDL")
-    def test_no_subtitles_uses_description(self, mock_ydl_cls):
+    def test_no_subtitles_falls_back_to_whisper(self, mock_ydl_cls, mock_whisper):
         mock_ydl = MagicMock()
         mock_ydl_cls.return_value.__enter__ = MagicMock(return_value=mock_ydl)
         mock_ydl_cls.return_value.__exit__ = MagicMock(return_value=False)
@@ -78,11 +79,13 @@ class TestExtractYoutube:
         }
 
         result = extract_youtube("https://youtube.com/watch?v=nosubs", "s1")
-        assert result.processing_status == "partial"
-        assert "A video about markets" in result.raw_text
+        assert result.processing_status == "success"
+        assert "Whisper transcript text" in result.raw_text
+        mock_whisper.assert_called_once()
 
+    @patch("yt_transcriber.pipeline.process_url_to_transcript", side_effect=Exception("Whisper failed"))
     @patch("yt_dlp.YoutubeDL")
-    def test_no_subtitles_no_description(self, mock_ydl_cls):
+    def test_no_subtitles_whisper_fails(self, mock_ydl_cls, mock_whisper):
         mock_ydl = MagicMock()
         mock_ydl_cls.return_value.__enter__ = MagicMock(return_value=mock_ydl)
         mock_ydl_cls.return_value.__exit__ = MagicMock(return_value=False)

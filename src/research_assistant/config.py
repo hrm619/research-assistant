@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     log_path: str = str(Path.home() / ".research-assistant" / "ra.log")
     log_level: str = "INFO"
 
+    openai_api_key: str = ""
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
 

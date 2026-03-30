@@ -16,10 +16,14 @@ dependencies = [
     "requests",
     "python-dotenv",
     "pytest",
+    "yt-transcriber @ git+https://github.com/hrm619/yt_transcriber.git",
 ]
 
 [project.scripts]
 ra = "research_assistant.cli:cli"
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [build-system]
 requires = ["hatchling"]

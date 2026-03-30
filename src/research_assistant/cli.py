@@ -77,6 +77,7 @@ def ingest(app, url, domain, trust_tier, author):
     from research_assistant.extractors.youtube import detect_source_type
     from research_assistant.stages.ingest import ingest_content, register_source
 
+    url = url.replace("\\", "")
     source_type = detect_source_type(url)
     click.echo(f"Detected source type: {source_type}")
 
@@ -130,9 +131,12 @@ def distill(app, domain, mode, content_id, focus):
     if content_id:
         content_ids = [content_id]
     else:
-        # Distill all content for the domain
+        # Distill all content for the domain, skipping failed ingestions
         content_rows = list_content(domain, app.conn)
-        content_ids = [r["content_id"] for r in content_rows]
+        content_ids = [
+            r["content_id"] for r in content_rows
+            if r.get("processing_status") == "success" and r.get("word_count", 0) > 0
+        ]
 
     if not content_ids:
         click.echo("No content found to distill.")
@@ -506,7 +510,7 @@ def list_hypotheses_cmd(app, domain, hyp_status):
         feas = json.loads(r["feasibility_json"])
         status_colors = {"draft": "yellow", "accepted": "green", "rejected": "red"}
         status_badge = click.style(f"[{r['status']}]", fg=status_colors.get(r["status"], "white"))
-        click.echo(f"{status_badge} {r['hypothesis_id'][:8]}... {defn.get('name', 'unnamed')}")
+        click.echo(f"{status_badge} {r['hypothesis_id']} {defn.get('name', 'unnamed')}")
         click.echo(f"  Statement: {defn.get('statement', '')[:80]}")
         click.echo(f"  Testability: {feas.get('estimated_testability', 'unknown')}")
         click.echo()

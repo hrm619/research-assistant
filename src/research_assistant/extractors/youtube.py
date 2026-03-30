@@ -81,8 +81,8 @@ def extract_youtube(url: str, source_id: str) -> ContentItem:
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
 
-    title = info.get("title", "Unknown")
-    author = info.get("uploader", info.get("channel", "Unknown"))
+    title = info.get("title") or "Unknown"
+    author = info.get("uploader") or info.get("channel") or "Unknown"
     upload_date = info.get("upload_date")
     published_at = None
     if upload_date:
@@ -98,16 +98,24 @@ def extract_youtube(url: str, source_id: str) -> ContentItem:
         status = "success"
         error = None
     else:
-        # Fall back to description as last resort
-        description = info.get("description", "")
-        if description:
-            transcript = f"[No transcript available. Video description:]\n{description}"
-            status = "partial"
-            error = "No subtitles found; used video description as fallback"
-        else:
+        # Fall back to Whisper transcription via yt_transcriber
+        try:
+            from yt_transcriber.pipeline import process_url_to_transcript
+
+            logger.info("No subtitles found, falling back to Whisper transcription for %s", url)
+            transcript = process_url_to_transcript(url)
+            if transcript and transcript.strip():
+                status = "success"
+                error = None
+            else:
+                transcript = ""
+                status = "failed"
+                error = "Whisper transcription returned empty result"
+        except Exception as e:
+            logger.warning("Whisper transcription failed for %s: %s", url, e)
             transcript = ""
             status = "failed"
-            error = "No subtitles or description available"
+            error = f"Whisper transcription failed: {e}"
 
     return ContentItem(
         source_id=source_id,
