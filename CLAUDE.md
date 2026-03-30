@@ -29,15 +29,23 @@ All LLM calls and YouTube extraction are mocked in tests. No API keys needed to 
 
 ## CLI Commands
 
+### Pipeline stages
 ```bash
 ra orient --domain "fed_rate_decisions" --market kalshi --known-domains "sports,politics"
 ra ingest --url "https://youtube.com/watch?v=..." --domain fed_rate_decisions --trust-tier core
 ra ingest-batch --source-file sources.json --domain fed_rate_decisions
 ra distill --domain fed_rate_decisions --mode both
 ra translate --domain fed_rate_decisions --mode explore
+```
+
+### Inspection & export
+```bash
 ra status --domain fed_rate_decisions
-ra list insights --domain fed_rate_decisions
-ra list hypotheses --domain fed_rate_decisions
+ra list insights --domain fed_rate_decisions [--type framework|claim|observation] [--status active|merged|discarded]
+ra list hypotheses --domain fed_rate_decisions [--status draft|accepted|rejected|tested]
+ra show domain --domain fed_rate_decisions
+ra show insight --id <insight-id>
+ra show hypothesis --id <hypothesis-id>
 ra export --hypothesis-id <id> --format json
 ```
 
@@ -46,7 +54,7 @@ ra export --hypothesis-id <id> --format json
 - **Package layout**: `src/research_assistant/` (src layout, hatchling build)
 - **Entry point**: `ra` → `research_assistant.cli:cli` (Click)
 - **DB**: SQLite via `db.py` — all entities stored with JSON blob columns for nested data. Schema auto-migrates on CLI startup.
-- **LLM**: Anthropic Claude via `llm.py` — centralized client with JSON parsing, Pydantic validation, and retry-with-backoff. Re-prompts on validation failure.
+- **LLM**: Anthropic Claude (`claude-sonnet-4-20250514`) via `llm.py` — centralized client with JSON parsing, Pydantic validation, and retry-with-backoff. Re-prompts on validation failure. Model configurable via `LLM_MODEL` env var.
 - **Schemas**: Pydantic v2 models in `schemas.py` for all entities with cross-field validators (e.g., framework insights must have mechanism, hypotheses must have weaknesses)
 - **Stages**: Each in `stages/` — `orient.py`, `ingest.py`, `distill.py`, `translate.py`. Each follows the pattern: build prompt → call LLM → validate → save to DB.
 - **Extractors**: `extractors/youtube.py` (MVP). Uses yt-dlp for metadata + subtitle extraction.

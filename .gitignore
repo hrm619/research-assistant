@@ -30,3 +30,6 @@ research_assistant_build_spec.docx
 
 # pytest
 .pytest_cache/
+
+# yt_transcriber data (audio, transcripts, temp chunks)
+data/
