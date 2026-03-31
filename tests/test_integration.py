@@ -111,6 +111,15 @@ TRANSLATE_RESPONSE = json.dumps([
             "assumptions_added": ["Kalshi matches NBER definition"],
             "weaknesses": ["small sample"],
         },
+        "test_definition": {
+            "hypothesis_name": "yield_curve_recession_predictor",
+            "description": "Yield curve inversion predicts recession",
+            "version": "1.0.0",
+            "metrics": ["points_per_game_std"],
+            "classification": {"type": "quartile", "metric": "points_per_game_std"},
+            "outcome": "ats",
+            "lookback": "season_to_date",
+        },
     },
     {
         "definition": {
@@ -135,6 +144,15 @@ TRANSLATE_RESPONSE = json.dumps([
             "translation_logic": "If inflation stable -> Fed holds -> contract settles YES",
             "assumptions_added": ["No external shock"],
             "weaknesses": ["Single expert view"],
+        },
+        "test_definition": {
+            "hypothesis_name": "fed_hold_q3_predictor",
+            "description": "Fed funds rate hold predicts contract settlement",
+            "version": "1.0.0",
+            "metrics": ["points_per_game_std"],
+            "classification": {"type": "quartile", "metric": "points_per_game_std"},
+            "outcome": "ats",
+            "lookback": "season_to_date",
         },
     },
 ])
@@ -223,11 +241,14 @@ class TestFullPipeline:
         junctions = list_rows(conn, "hypothesis_insight")
         assert len(junctions) == 4  # 2 hypotheses x 2 insights
 
-        # 5. Export
+        # 5. Export (Contract 1 format)
         exported = export_for_harness(hyp_ids[0], conn)
         assert exported is not None
-        assert exported["definition"]["name"] == "yield_curve_recession_predictor"
-        assert "reasoning_chain" in exported
+        assert exported["contract_version"] == "1.0.0"
+        assert exported["producer"] == "research-assistant"
+        assert exported["rich_definition"]["name"] == "yield_curve_recession_predictor"
+        assert "reasoning_chain" in exported["rich_definition"]
+        assert exported["test_definition"]["hypothesis_name"] == "yield_curve_recession_predictor"
 
         # Verify counts
         sources = list_rows(conn, "source", {"domain_id": domain_id})

@@ -20,7 +20,7 @@ Requires `ANTHROPIC_API_KEY` in `.env` (gitignored) for LLM calls. Config in `sr
 ## Testing
 
 ```bash
-uv run pytest                        # run all 77 tests
+uv run pytest                        # run all 91 tests
 uv run pytest tests/test_foo.py      # single file
 uv run pytest -k "test_name"         # single test by name
 ```
@@ -36,6 +36,7 @@ ra ingest --url "https://youtube.com/watch?v=..." --domain fed_rate_decisions --
 ra ingest-batch --source-file sources.json --domain fed_rate_decisions
 ra distill --domain fed_rate_decisions --mode both
 ra translate --domain fed_rate_decisions --mode explore
+ra translate --domain nfl --domain-registry ~/.fin-arb/contracts/registries/nfl.json  # with metrics catalog
 ```
 
 ### Inspection & export
@@ -46,7 +47,8 @@ ra list hypotheses --domain fed_rate_decisions [--status draft|accepted|rejected
 ra show domain --domain fed_rate_decisions
 ra show insight --id <insight-id>
 ra show hypothesis --id <hypothesis-id>
-ra export --hypothesis-id <id> --format json
+ra export --hypothesis-id <id> --format json                          # Print to stdout
+ra export --hypothesis-id <id> --domain-registry <path> --output <path>  # Contract 1 JSON
 ```
 
 ## Architecture
@@ -55,8 +57,9 @@ ra export --hypothesis-id <id> --format json
 - **Entry point**: `ra` → `research_assistant.cli:cli` (Click)
 - **DB**: SQLite via `db.py` — all entities stored with JSON blob columns for nested data. Schema auto-migrates on CLI startup.
 - **LLM**: Anthropic Claude (`claude-sonnet-4-20250514`) via `llm.py` — centralized client with JSON parsing, Pydantic validation, and retry-with-backoff. Re-prompts on validation failure. Model configurable via `LLM_MODEL` env var.
-- **Schemas**: Pydantic v2 models in `schemas.py` for all entities with cross-field validators (e.g., framework insights must have mechanism, hypotheses must have weaknesses)
-- **Stages**: Each in `stages/` — `orient.py`, `ingest.py`, `distill.py`, `translate.py`. Each follows the pattern: build prompt → call LLM → validate → save to DB.
+- **Schemas**: Pydantic v2 models in `schemas.py` for all entities with cross-field validators (e.g., framework insights must have mechanism, hypotheses must have weaknesses). Includes `TestDefinition` model for machine-readable hypothesis specs.
+- **Contracts**: `contracts.py` — domain registry loading and test_definition validation against metrics catalogs. Used by translate and export stages.
+- **Stages**: Each in `stages/` — `orient.py`, `ingest.py`, `distill.py`, `translate.py`. Each follows the pattern: build prompt → call LLM → validate → save to DB. Translate supports `--domain-registry` for metrics catalog injection and `test_definition` generation.
 - **Extractors**: `extractors/youtube.py` (MVP). Uses yt-dlp for metadata + subtitle extraction.
 - **Prompts**: Plain text templates in `prompts/` with `{placeholder}` substitution, loaded via `importlib.resources`.
 

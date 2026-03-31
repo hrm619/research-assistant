@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS hypothesis (
     definition_json TEXT NOT NULL,
     feasibility_json TEXT NOT NULL,
     reasoning_chain_json TEXT NOT NULL,
+    test_definition_json TEXT,
     operator_note TEXT
 );
 
@@ -83,6 +84,12 @@ def get_connection(db_path: str = ":memory:") -> sqlite3.Connection:
 
 def migrate(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA_SQL)
+    # Add test_definition_json column to existing hypothesis tables
+    try:
+        conn.execute("ALTER TABLE hypothesis ADD COLUMN test_definition_json TEXT")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # Column already exists
 
 
 def insert_row(conn: sqlite3.Connection, table: str, data: dict) -> str:

@@ -43,5 +43,5 @@ Each Hypothesis object schema:
     "translation_logic": "string (how we got from insight to hypothesis)",
     "assumptions_added": ["string (assumptions the translation introduced)"],
     "weaknesses": ["string (known vulnerabilities)"]
-  }}
+  }}{test_definition_schema}
 }}

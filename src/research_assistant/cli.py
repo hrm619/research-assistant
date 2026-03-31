@@ -159,9 +159,15 @@ def distill(app, domain, mode, content_id, focus):
 @click.option("--insight-id", multiple=True, help="Specific insight IDs to translate")
 @click.option("--markets", default="", help="Comma-separated accessible markets")
 @click.option("--data-sources", default="", help="Comma-separated available data sources")
+@click.option(
+    "--domain-registry", default=None, type=click.Path(exists=True),
+    help="Path to domain registry JSON for test_definition generation",
+)
 @pass_app
-def translate(app, domain, mode, insight_id, markets, data_sources):
+def translate(app, domain, mode, insight_id, markets, data_sources, domain_registry):
     """Convert insights into testable hypothesis definitions."""
+    from pathlib import Path
+
     from research_assistant.stages.distill import list_insights
     from research_assistant.stages.translate import (
         assess_feasibility,
@@ -184,8 +190,15 @@ def translate(app, domain, mode, insight_id, markets, data_sources):
         available_data_sources=[d.strip() for d in data_sources.split(",") if d.strip()],
     )
 
+    registry_path = Path(domain_registry) if domain_registry else None
+
     click.echo(f"Translating {len(iids)} insights in {mode} mode...")
-    hypotheses = run_translate(iids, domain, mode, op_context, app.conn, app.settings)
+    if registry_path:
+        click.echo(f"Using domain registry: {registry_path}")
+    hypotheses = run_translate(
+        iids, domain, mode, op_context, app.conn, app.settings,
+        domain_registry_path=registry_path,
+    )
 
     for h in hypotheses:
         assess_feasibility(h, op_context)
@@ -193,7 +206,8 @@ def translate(app, domain, mode, insight_id, markets, data_sources):
     ids = save_hypotheses(hypotheses, iids, app.conn)
     click.echo(click.style(f"Generated {len(ids)} hypotheses", fg="green"))
     for h in hypotheses:
-        click.echo(f"  - {h.definition.name} (testability: {h.feasibility.estimated_testability})")
+        has_test_def = " [+test_definition]" if h.test_definition else ""
+        click.echo(f"  - {h.definition.name} (testability: {h.feasibility.estimated_testability}){has_test_def}")
 
 
 @cli.group()
@@ -519,14 +533,43 @@ def list_hypotheses_cmd(app, domain, hyp_status):
 @cli.command()
 @click.option("--hypothesis-id", required=True, help="Hypothesis ID to export")
 @click.option("--format", "fmt", type=click.Choice(["json"]), default="json")
+@click.option(
+    "--domain-registry", default=None, type=click.Path(exists=True),
+    help="Path to domain registry JSON for validation",
+)
+@click.option(
+    "--output", "-o", default=None, type=click.Path(),
+    help="Output file path (default: stdout)",
+)
 @pass_app
-def export(app, hypothesis_id, fmt):
-    """Export hypothesis for testing harness."""
+def export(app, hypothesis_id, fmt, domain_registry, output):
+    """Export hypothesis as Contract 1 JSON for factor-research."""
+    from pathlib import Path
+
     from research_assistant.stages.translate import export_for_harness
 
-    result = export_for_harness(hypothesis_id, app.conn)
+    registry = None
+    if domain_registry:
+        from research_assistant.contracts import load_domain_registry
+        registry = load_domain_registry(Path(domain_registry))
+
+    output_path = Path(output) if output else None
+
+    try:
+        result = export_for_harness(
+            hypothesis_id, app.conn,
+            domain_registry=registry,
+            output_path=output_path,
+        )
+    except ValueError as e:
+        click.echo(click.style(str(e), fg="red"), err=True)
+        raise SystemExit(1)
+
     if not result:
         click.echo(click.style(f"Hypothesis not found: {hypothesis_id}", fg="red"))
-        return
+        raise SystemExit(1)
 
-    click.echo(json.dumps(result, indent=2))
+    if output_path:
+        click.echo(click.style(f"Contract 1 written to {output_path}", fg="green"))
+    else:
+        click.echo(json.dumps(result, indent=2))

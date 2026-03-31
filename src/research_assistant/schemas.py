@@ -156,6 +156,25 @@ class Insight(BaseModel):
         return self
 
 
+# --- TestDefinition (machine-readable for factor-research) ---
+
+
+class TestDefinition(BaseModel):
+    hypothesis_name: str
+    description: str
+    version: str = "1.0.0"
+    metrics: list[str]
+    classification: dict
+    outcome: str
+    lookback: str
+    filters: dict | None = None
+    min_sample_size: int = 50
+    statistical_test: str = "binomial"
+    significance_threshold: float = 0.05
+    comparison_buckets: list[str] = Field(default_factory=list)
+    time_windows: list[dict] = Field(default_factory=list)
+
+
 # --- Hypothesis ---
 
 
@@ -201,6 +220,7 @@ class Hypothesis(BaseModel):
     definition: HypothesisDefinition
     feasibility: Feasibility
     reasoning_chain: ReasoningChain
+    test_definition: TestDefinition | None = None
     operator_note: str | None = None
 
 

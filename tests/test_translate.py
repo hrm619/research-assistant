@@ -75,6 +75,16 @@ def conn():
     return c
 
 
+SAMPLE_TEST_DEFINITION = {
+    "hypothesis_name": "yield_curve_recession_predictor",
+    "description": "Tests whether yield curve inversion predicts recession contract resolution",
+    "version": "1.0.0",
+    "metrics": ["points_per_game_std"],
+    "classification": {"type": "quartile", "metric": "points_per_game_std"},
+    "outcome": "ats",
+    "lookback": "season_to_date",
+}
+
 SAMPLE_HYPOTHESIS = {
     "definition": {
         "name": "yield_curve_recession_predictor",
@@ -99,6 +109,7 @@ SAMPLE_HYPOTHESIS = {
         "assumptions_added": ["Kalshi recession contract definition matches NBER definition"],
         "weaknesses": ["Small historical sample of inversions"],
     },
+    "test_definition": SAMPLE_TEST_DEFINITION,
 }
 
 SAMPLE_LLM_RESPONSE = json.dumps([SAMPLE_HYPOTHESIS])
@@ -163,8 +174,29 @@ class TestExport:
         save_hypotheses([hyp], ["i1"], conn)
         result = export_for_harness(hyp.hypothesis_id, conn)
         assert result is not None
-        assert result["definition"]["name"] == "yield_curve_recession_predictor"
-        assert "operator_note" not in result
+        # Contract 1 format
+        assert result["contract_version"] == "1.0.0"
+        assert result["producer"] == "research-assistant"
+        assert result["rich_definition"]["name"] == "yield_curve_recession_predictor"
+        assert result["test_definition"]["hypothesis_name"] == "yield_curve_recession_predictor"
+        assert result["domain_name"] == "test_domain"
 
     def test_export_nonexistent(self, conn):
         assert export_for_harness("nonexistent", conn) is None
+
+    def test_export_without_test_definition(self, conn):
+        hyp_data = {k: v for k, v in SAMPLE_HYPOTHESIS.items() if k != "test_definition"}
+        hyp = Hypothesis(domain_id="d1", **hyp_data)
+        save_hypotheses([hyp], ["i1"], conn)
+        with pytest.raises(ValueError, match="no test_definition"):
+            export_for_harness(hyp.hypothesis_id, conn)
+
+    def test_export_to_file(self, conn, tmp_path):
+        hyp = Hypothesis(domain_id="d1", **SAMPLE_HYPOTHESIS)
+        save_hypotheses([hyp], ["i1"], conn)
+        out = tmp_path / "output.json"
+        result = export_for_harness(hyp.hypothesis_id, conn, output_path=out)
+        assert out.exists()
+        written = json.loads(out.read_text())
+        assert written["contract_version"] == "1.0.0"
+        assert written["test_definition"]["hypothesis_name"] == "yield_curve_recession_predictor"

@@ -17,6 +17,9 @@ class Settings(BaseSettings):
 
     openai_api_key: str = ""
 
+    contracts_dir: str = str(Path.home() / ".fin-arb" / "contracts")
+    domain_registry_path: str = ""
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
 

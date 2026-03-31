@@ -49,9 +49,10 @@ Extracts frameworks (mental models with mechanisms, conditions, predictions) and
 
 ```bash
 ra translate --domain fed_rate_decisions --mode explore
+ra translate --domain nfl --domain-registry ~/.fin-arb/contracts/registries/nfl.json  # with metrics catalog
 ```
 
-Converts insights into structured hypothesis definitions with feasibility assessments, data requirements, and market expressions.
+Converts insights into structured hypothesis definitions. When `--domain-registry` is provided, the LLM is constrained to valid metrics from the catalog and generates a machine-readable `test_definition` alongside the human-readable definition.
 
 ### Inspection & export
 
@@ -62,7 +63,8 @@ ra show insight --id <insight-id>              # detailed insight view
 ra show hypothesis --id <hypothesis-id>        # detailed hypothesis view
 ra list insights --domain fed_rate_decisions   # list insights (filterable by --type, --status)
 ra list hypotheses --domain fed_rate_decisions # list hypotheses (filterable by --status)
-ra export --hypothesis-id <id> --format json   # export for testing harness
+ra export --hypothesis-id <id> --format json   # export to stdout
+ra export --hypothesis-id <id> --domain-registry <path> --output <path>  # Contract 1 JSON for factor-research
 ```
 
 ## Testing
@@ -82,7 +84,8 @@ src/research_assistant/
   config.py       # Settings (pydantic-settings, .env)
   db.py           # SQLite with JSON blob columns, auto-migration
   llm.py          # Anthropic client with retries & Pydantic validation
-  schemas.py      # Pydantic v2 models for all entities
+  schemas.py      # Pydantic v2 models for all entities (includes TestDefinition)
+  contracts.py    # Domain registry loading & test_definition validation
   stages/         # orient, ingest, distill, translate
   extractors/     # youtube (MVP)
   prompts/        # plain text templates with {placeholder} substitution
