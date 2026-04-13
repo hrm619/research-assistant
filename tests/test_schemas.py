@@ -3,7 +3,6 @@ from pydantic import ValidationError
 
 from research_assistant.schemas import (
     Claim,
-    ContentItem,
     DomainBriefContent,
     Feasibility,
     Framework,
@@ -211,28 +210,3 @@ class TestHypothesis:
             })
 
 
-class TestContentItem:
-    def test_valid(self):
-        item = ContentItem(
-            source_id="s1",
-            content_type="transcript",
-            title="Test Video",
-            author="Author",
-            raw_text="Some text content here",
-            word_count=4,
-        )
-        assert item.processing_status == "success"
-        assert item.format_metadata.has_sections is False
-
-    def test_json_round_trip(self):
-        item = ContentItem(
-            source_id="s1",
-            content_type="transcript",
-            title="Test",
-            author="Author",
-            raw_text="text",
-            word_count=1,
-        )
-        data = item.model_dump()
-        item2 = ContentItem(**data)
-        assert item2.content_id == item.content_id

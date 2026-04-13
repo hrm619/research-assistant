@@ -4,12 +4,17 @@ import sqlite3
 from importlib import resources
 from pathlib import Path
 
+import chromadb
+
 from research_assistant.config import Settings
 from research_assistant.db import get_row, insert_row, list_rows, resolve_domain
+from research_assistant.insight_embedder import build_embedding_text, get_or_create_insights_collection
 from research_assistant.llm import call_llm, parse_json_response, retry_with_backoff
 from research_assistant.schemas import (
     Hypothesis,
+    Insight,
     OperatorContext,
+    SourceCoverage,
     _now_iso,
     _uuid,
 )
@@ -165,6 +170,286 @@ def run_translate(
     )
 
 
+def query_corpus(
+    seed_insight: dict,
+    domain: str,
+    conn: sqlite3.Connection,
+    chroma_client: chromadb.ClientAPI,
+    n_results: int = 15,
+    trust_tiers: list[str] | None = None,
+) -> list[dict]:
+    collection = get_or_create_insights_collection(chroma_client, domain)
+
+    if collection.count() == 0:
+        return []
+
+    fw = json.loads(seed_insight["framework_json"]) if seed_insight.get("framework_json") else None
+    cl = json.loads(seed_insight["claim_json"]) if seed_insight.get("claim_json") else None
+
+    seed_as_insight = Insight(
+        insight_id=seed_insight["insight_id"],
+        content_id=seed_insight.get("content_id", ""),
+        content_item_ref=seed_insight.get("content_item_ref", ""),
+        domain_id=seed_insight.get("domain_id", ""),
+        insight_type=seed_insight["insight_type"],
+        framework=fw,
+        claim=cl,
+        source_quote_ref=seed_insight.get("source_quote_ref", ""),
+        analyst=seed_insight.get("analyst", ""),
+        trust_tier=seed_insight.get("trust_tier", ""),
+    )
+    query_text = build_embedding_text(seed_as_insight)
+
+    where_filter = None
+    if trust_tiers:
+        where_filter = {"trust_tier": {"$in": trust_tiers}}
+
+    actual_n = min(n_results + 1, collection.count())
+    results = collection.query(
+        query_texts=[query_text],
+        n_results=actual_n,
+        where=where_filter,
+    )
+
+    if not results["ids"] or not results["ids"][0]:
+        return []
+
+    hydrated = []
+    for i, chroma_id in enumerate(results["ids"][0]):
+        meta = results["metadatas"][0][i] if results["metadatas"] else {}
+        insight_id = meta.get("insight_id", "")
+
+        if insight_id == seed_insight["insight_id"]:
+            continue
+
+        row = get_row(conn, "insight", "insight_id", insight_id)
+        if row:
+            record = dict(row)
+            if record.get("framework_json"):
+                record["framework"] = json.loads(record["framework_json"])
+            if record.get("claim_json"):
+                record["claim"] = json.loads(record["claim_json"])
+            record["_distance"] = results["distances"][0][i] if results["distances"] else None
+            hydrated.append(record)
+
+    return hydrated[:n_results]
+
+
+def _build_corpus_prompt_section(seed: dict, retrieved: list[dict]) -> str:
+    lines = ["SEED INSIGHT (anchor for this hypothesis):"]
+    lines.append(json.dumps(_summarize_insight(seed), indent=2))
+    lines.append("")
+
+    if retrieved:
+        lines.append(f"RETRIEVED CORPUS ({len(retrieved)} related insights):")
+        lines.append("For each, label as: agrees | extends | contradicts | orthogonal")
+        lines.append("")
+        for i, r in enumerate(retrieved, 1):
+            lines.append(f"--- Retrieved Insight {i} ---")
+            lines.append(json.dumps(_summarize_insight(r), indent=2))
+            lines.append("")
+    else:
+        lines.append("NO RELATED INSIGHTS FOUND IN CORPUS.")
+        lines.append("Generate hypothesis from this single source. Note thin evidence base in synthesis_note.")
+
+    return "\n".join(lines)
+
+
+def _summarize_insight(row: dict) -> dict:
+    summary = {
+        "insight_id": row.get("insight_id", ""),
+        "insight_type": row.get("insight_type", ""),
+        "analyst": row.get("analyst", ""),
+        "trust_tier": row.get("trust_tier", ""),
+    }
+    if row.get("framework"):
+        fw = row["framework"] if isinstance(row["framework"], dict) else json.loads(row["framework"])
+        summary["framework_name"] = fw.get("name", "")
+        summary["mechanism"] = fw.get("mechanism", "")
+        summary["conditions"] = fw.get("conditions", [])
+        summary["predictions"] = fw.get("predictions", [])
+    if row.get("claim"):
+        cl = row["claim"] if isinstance(row["claim"], dict) else json.loads(row["claim"])
+        summary["statement"] = cl.get("statement", "")
+        summary["reasoning"] = cl.get("reasoning", "")
+        summary["timeframe"] = cl.get("timeframe", "")
+    return summary
+
+
+CORPUS_TRANSLATE_INSTRUCTIONS = """
+
+CORPUS SYNTHESIS INSTRUCTIONS:
+- For each retrieved insight, explicitly label it as: agrees, extends, contradicts, or orthogonal relative to the seed.
+- Build the hypothesis from the NET CORPUS VIEW, not just the seed insight.
+- Where experts disagree, the hypothesis should account for the disagreement.
+- Populate these additional fields in each hypothesis:
+  "supporting_insight_ids": [list of insight_ids labeled agrees or extends],
+  "contradicting_insight_ids": [list of insight_ids labeled contradicts],
+  "source_coverage": {"analysts": [unique analyst names], "trust_tiers": [unique tiers], "n_sources": int},
+  "synthesis_note": "short explanation of how multi-source view shaped the hypothesis"
+"""
+
+
+def build_corpus_translate_prompt(
+    seed: dict,
+    retrieved: list[dict],
+    domain_brief_json: str,
+    operator_context: OperatorContext,
+    mode: str,
+    domain_registry: dict | None = None,
+) -> tuple[str, str]:
+    template = _load_prompt_template()
+
+    if domain_registry:
+        schema_section = _build_test_definition_schema(domain_registry)
+    else:
+        schema_section = ""
+    system = template.replace("{test_definition_schema}", schema_section)
+    system += CORPUS_TRANSLATE_INSTRUCTIONS
+
+    corpus_section = _build_corpus_prompt_section(seed, retrieved)
+
+    user_prompt = f"Domain context:\n{domain_brief_json}\n\n"
+    user_prompt += f"Operator context:\n{operator_context.model_dump_json()}\n\n"
+    user_prompt += f"Translation mode: {mode}\n\n"
+    user_prompt += corpus_section
+
+    return system, user_prompt
+
+
+def run_translate_corpus(
+    seed_insight_id: str,
+    domain_id: str,
+    mode: str,
+    operator_context: OperatorContext,
+    conn: sqlite3.Connection,
+    settings: Settings,
+    chroma_client: chromadb.ClientAPI,
+    corpus_k: int = 15,
+    include_exploratory: bool = False,
+    domain_registry_path: Path | None = None,
+) -> list[Hypothesis]:
+    resolved = resolve_domain(conn, domain_id)
+    if not resolved:
+        raise ValueError(f"Domain not found: {domain_id}")
+
+    domain_row = get_row(conn, "domain_brief", "domain_id", resolved)
+    domain_brief_json = domain_row["brief_json"] if domain_row else "{}"
+    domain_name = domain_row["domain_name"] if domain_row else domain_id
+
+    domain_registry = None
+    if domain_registry_path:
+        from research_assistant.contracts import load_domain_registry
+        domain_registry = load_domain_registry(domain_registry_path)
+
+    seed_row = get_row(conn, "insight", "insight_id", seed_insight_id)
+    if not seed_row:
+        raise ValueError(f"Seed insight not found: {seed_insight_id}")
+
+    seed = dict(seed_row)
+    if seed.get("framework_json"):
+        seed["framework"] = json.loads(seed["framework_json"])
+    if seed.get("claim_json"):
+        seed["claim"] = json.loads(seed["claim_json"])
+
+    trust_tiers = ["core", "supplementary"]
+    if include_exploratory:
+        trust_tiers.append("exploratory")
+
+    retrieved = query_corpus(
+        seed, domain_name, conn, chroma_client, n_results=corpus_k,
+        trust_tiers=trust_tiers,
+    )
+
+    system, prompt = build_corpus_translate_prompt(
+        seed, retrieved, domain_brief_json, operator_context, mode,
+        domain_registry=domain_registry,
+    )
+
+    def _attempt():
+        raw = call_llm(prompt, system, settings)
+        data = parse_json_response(raw)
+        if not isinstance(data, list):
+            raise ValueError(f"Expected JSON array, got {type(data).__name__}")
+
+        hypotheses = []
+        for item in data:
+            item["domain_id"] = resolved
+            item["hypothesis_id"] = _uuid()
+            item["created_at"] = _now_iso()
+            item["status"] = "draft"
+
+            if "source_coverage" not in item or not item["source_coverage"]:
+                all_analysts = {seed.get("analyst", "")}
+                all_tiers = {seed.get("trust_tier", "")}
+                for r in retrieved:
+                    all_analysts.add(r.get("analyst", ""))
+                    all_tiers.add(r.get("trust_tier", ""))
+                all_analysts.discard("")
+                all_tiers.discard("")
+                item["source_coverage"] = {
+                    "analysts": sorted(all_analysts),
+                    "trust_tiers": sorted(all_tiers),
+                    "n_sources": len(all_analysts),
+                }
+
+            if not item.get("supporting_insight_ids"):
+                item["supporting_insight_ids"] = []
+            if not item.get("contradicting_insight_ids"):
+                item["contradicting_insight_ids"] = []
+
+            if not item.get("synthesis_note") and len(retrieved) == 0:
+                item["synthesis_note"] = "Single source — thin evidence base, no corroborating insights found."
+
+            hyp = Hypothesis.model_validate(item)
+
+            if domain_registry and hyp.test_definition:
+                from research_assistant.contracts import validate_test_definition
+                errors = validate_test_definition(
+                    hyp.test_definition.model_dump(), domain_registry,
+                )
+                if errors:
+                    raise ValueError(f"test_definition validation failed: {errors}")
+
+            hypotheses.append(hyp)
+        return hypotheses
+
+    return retry_with_backoff(
+        _attempt,
+        max_retries=settings.llm_max_retries,
+        base=settings.llm_backoff_base,
+        factor=settings.llm_backoff_factor,
+    )
+
+
+def select_seed_insights(
+    domain_id: str, conn: sqlite3.Connection,
+) -> list[str]:
+    resolved = resolve_domain(conn, domain_id)
+    if not resolved:
+        return []
+
+    rows = conn.execute(
+        """SELECT i.insight_id FROM insight i
+           LEFT JOIN hypothesis_insight hi ON i.insight_id = hi.insight_id
+           WHERE i.domain_id = ? AND i.status = 'active'
+             AND i.insight_type = 'framework'
+             AND hi.insight_id IS NULL
+           ORDER BY i.extracted_at DESC""",
+        (resolved,),
+    ).fetchall()
+
+    if not rows:
+        rows = conn.execute(
+            """SELECT i.insight_id FROM insight i
+               WHERE i.domain_id = ? AND i.status = 'active'
+               ORDER BY i.extracted_at DESC""",
+            (resolved,),
+        ).fetchall()
+
+    return [r[0] for r in rows]
+
+
 def assess_feasibility(hypothesis: Hypothesis, operator_context: OperatorContext) -> Hypothesis:
     available = set(s.lower() for s in operator_context.available_data_sources)
     required = set(s.lower() for s in hypothesis.definition.data_required)
@@ -194,6 +479,10 @@ def save_hypotheses(
                 if hyp.test_definition else None
             ),
             "operator_note": hyp.operator_note,
+            "supporting_insight_ids": json.dumps(hyp.supporting_insight_ids) if hyp.supporting_insight_ids else None,
+            "contradicting_insight_ids": json.dumps(hyp.contradicting_insight_ids) if hyp.contradicting_insight_ids else None,
+            "source_coverage": hyp.source_coverage.model_dump_json() if hyp.source_coverage else None,
+            "synthesis_note": hyp.synthesis_note,
         })
         # Create junction rows
         for iid in insight_ids:

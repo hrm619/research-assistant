@@ -61,45 +61,6 @@ class OrientInput(BaseModel):
     seed_sources: list[str] = Field(default_factory=list)
 
 
-# --- Source ---
-
-
-class Source(BaseModel):
-    source_id: str = Field(default_factory=_uuid)
-    source_type: Literal["youtube", "substack", "article", "paper", "email_newsletter"]
-    url: str
-    author: str
-    domain_id: str
-    trust_tier: Literal["core", "supplementary", "exploratory"]
-    added_at: str = Field(default_factory=_now_iso)
-    active: int = 1
-
-
-# --- ContentItem ---
-
-
-class FormatMetadata(BaseModel):
-    has_sections: bool = False
-    has_citations: bool = False
-    has_data_tables: bool = False
-    is_paywalled: bool = False
-
-
-class ContentItem(BaseModel):
-    content_id: str = Field(default_factory=_uuid)
-    source_id: str
-    ingested_at: str = Field(default_factory=_now_iso)
-    content_type: Literal["transcript", "article", "paper", "newsletter"]
-    title: str
-    author: str
-    published_at: str | None = None
-    raw_text: str
-    word_count: int
-    format_metadata: FormatMetadata = Field(default_factory=FormatMetadata)
-    processing_status: Literal["success", "partial", "failed"] = "success"
-    error_detail: str | None = None
-
-
 # --- Insight ---
 
 
@@ -133,7 +94,8 @@ class Claim(BaseModel):
 class Insight(BaseModel):
     insight_id: str = Field(default_factory=_uuid)
     content_id: str
-    source_id: str
+    content_item_ref: str = ""
+    source_id: str = ""
     domain_id: str
     extracted_at: str = Field(default_factory=_now_iso)
     insight_type: Literal["framework", "claim", "observation"]
@@ -142,6 +104,9 @@ class Insight(BaseModel):
     source_quote_ref: str
     operator_note: str | None = None
     status: Literal["active", "merged", "discarded"] = "active"
+    analyst: str = ""
+    trust_tier: str = ""
+    content_source: Literal["ra", "kb"] = "ra"
 
     @model_validator(mode="after")
     def check_type_data(self):
@@ -212,6 +177,12 @@ class ReasoningChain(BaseModel):
         return self
 
 
+class SourceCoverage(BaseModel):
+    analysts: list[str] = Field(default_factory=list)
+    trust_tiers: list[str] = Field(default_factory=list)
+    n_sources: int = 0
+
+
 class Hypothesis(BaseModel):
     hypothesis_id: str = Field(default_factory=_uuid)
     domain_id: str
@@ -222,6 +193,10 @@ class Hypothesis(BaseModel):
     reasoning_chain: ReasoningChain
     test_definition: TestDefinition | None = None
     operator_note: str | None = None
+    supporting_insight_ids: list[str] = Field(default_factory=list)
+    contradicting_insight_ids: list[str] = Field(default_factory=list)
+    source_coverage: SourceCoverage | None = None
+    synthesis_note: str | None = None
 
 
 # --- Stage Inputs ---

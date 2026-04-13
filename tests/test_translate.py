@@ -33,32 +33,11 @@ def conn():
         "brief_json": '{"confidence": "medium"}',
         "status": "active",
     })
-    insert_row(c, "source", {
-        "source_id": "s1",
-        "source_type": "youtube",
-        "url": "https://youtube.com/watch?v=test",
-        "author": "Expert",
-        "domain_id": "d1",
-        "trust_tier": "core",
-        "added_at": "2026-01-01T00:00:00Z",
-        "active": 1,
-    })
-    insert_row(c, "content_item", {
-        "content_id": "c1",
-        "source_id": "s1",
-        "ingested_at": "2026-01-01T00:00:00Z",
-        "content_type": "transcript",
-        "title": "Video",
-        "author": "Expert",
-        "raw_text": "text",
-        "word_count": 1,
-        "format_metadata": "{}",
-        "processing_status": "success",
-    })
     insert_row(c, "insight", {
         "insight_id": "i1",
         "content_id": "c1",
-        "source_id": "s1",
+        "content_item_ref": "c1",
+        "source_id": "",
         "domain_id": "d1",
         "extracted_at": "2026-01-01T00:00:00Z",
         "insight_type": "framework",

@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Research assistant that accelerates progression from domain curiosity to testable hypothesis. Four-stage pipeline: **Orient** (domain mapping) → **Ingest** (content extraction) → **Distill** (reasoning extraction) → **Translate** (hypothesis generation). Build spec lives in `research_assistant_build_spec.docx`.
+Research assistant that accelerates progression from domain curiosity to testable hypothesis. Four-stage pipeline: **Orient** (domain mapping) → **Retrieve** (select kb content) → **Distill** (reasoning extraction) → **Translate** (corpus-aware hypothesis generation).
+
+Content ingestion is handled by the `knowledge-base` repo (`kb ingest`). This repo consumes `kb.db` read-only.
 
 ## Development Setup
 
@@ -15,28 +17,37 @@ uv sync          # install dependencies
 uv run ra --help # CLI entry point
 ```
 
-Requires `ANTHROPIC_API_KEY` in `.env` (gitignored) for LLM calls. Config in `src/research_assistant/config.py` — defaults DB to `~/.research-assistant/ra.db`.
+### Required environment variables (`.env`, gitignored)
+- `ANTHROPIC_API_KEY` — for LLM calls (Distill, Translate)
+- `OPENAI_API_KEY` — for insight embedding to chroma (optional, enables corpus-aware Translate)
+- `KB_DB_PATH` — path to kb.db (default: `~/.knowledge-base/kb.db`)
+- `CHROMA_PERSIST_DIR` — path to ChromaDB (default: `~/.knowledge-base/chroma`)
+- `INSIGHT_EMBEDDING_MODEL` — OpenAI model (default: `text-embedding-3-small`)
+
+Config in `src/research_assistant/config.py` — defaults DB to `~/.research-assistant/ra.db`.
 
 ## Testing
 
 ```bash
-uv run pytest                        # run all 91 tests
+uv run pytest                        # run all tests
 uv run pytest tests/test_foo.py      # single file
 uv run pytest -k "test_name"         # single test by name
 ```
 
-All LLM calls and YouTube extraction are mocked in tests. No API keys needed to run tests.
+All LLM, OpenAI, and ChromaDB calls are mocked in tests. No API keys needed.
 
 ## CLI Commands
 
 ### Pipeline stages
 ```bash
 ra orient --domain "fed_rate_decisions" --market kalshi --known-domains "sports,politics"
-ra ingest --url "https://youtube.com/watch?v=..." --domain fed_rate_decisions --trust-tier core
-ra ingest-batch --source-file sources.json --domain fed_rate_decisions
-ra distill --domain fed_rate_decisions --mode both
-ra translate --domain fed_rate_decisions --mode explore
-ra translate --domain nfl --domain-registry ~/.fin-arb/contracts/registries/nfl.json  # with metrics catalog
+ra retrieve --domain nfl [--trust-tier core,supplementary] [--analyst barrett,jj] [--since 2025-01-01] [--dry-run]
+ra distill --domain nfl [--batch-id <uuid>] [--mode both] [--limit 10]
+ra distill --domain nfl --from-kb                    # direct KB path (bypasses batch)
+ra translate --domain nfl --mode explore              # corpus-aware (default)
+ra translate --seed-insight-id <id> --domain nfl      # anchor on specific insight
+ra translate --domain nfl --domain-registry <path>    # with metrics catalog
+ra reembed --domain nfl                               # retry failed insight embeddings
 ```
 
 ### Inspection & export
@@ -47,22 +58,40 @@ ra list hypotheses --domain fed_rate_decisions [--status draft|accepted|rejected
 ra show domain --domain fed_rate_decisions
 ra show insight --id <insight-id>
 ra show hypothesis --id <hypothesis-id>
-ra export --hypothesis-id <id> --format json                          # Print to stdout
-ra export --hypothesis-id <id> --domain-registry <path> --output <path>  # Contract 1 JSON
+ra export --hypothesis-id <id> --format json
+ra export --hypothesis-id <id> --domain-registry <path> --output <path>
+```
+
+### Migration (from pre-refactor ra.db)
+```bash
+ra migrate to-kb-ownership --dry-run   # preview
+ra migrate to-kb-ownership             # execute
 ```
 
 ## Architecture
 
 - **Package layout**: `src/research_assistant/` (src layout, hatchling build)
 - **Entry point**: `ra` → `research_assistant.cli:cli` (Click)
-- **DB**: SQLite via `db.py` — all entities stored with JSON blob columns for nested data. Schema auto-migrates on CLI startup.
-- **LLM**: Anthropic Claude (`claude-sonnet-4-20250514`) via `llm.py` — centralized client with JSON parsing, Pydantic validation, and retry-with-backoff. Re-prompts on validation failure. Model configurable via `LLM_MODEL` env var.
-- **Schemas**: Pydantic v2 models in `schemas.py` for all entities with cross-field validators (e.g., framework insights must have mechanism, hypotheses must have weaknesses). Includes `TestDefinition` model for machine-readable hypothesis specs.
-- **Contracts**: `contracts.py` — domain registry loading and test_definition validation against metrics catalogs. Used by translate and export stages.
-- **Stages**: Each in `stages/` — `orient.py`, `ingest.py`, `distill.py`, `translate.py`. Each follows the pattern: build prompt → call LLM → validate → save to DB. Translate supports `--domain-registry` for metrics catalog injection and `test_definition` generation.
-- **Extractors**: `extractors/youtube.py` (MVP). Uses yt-dlp for metadata + subtitle extraction.
-- **Prompts**: Plain text templates in `prompts/` with `{placeholder}` substitution, loaded via `importlib.resources`.
+- **DB**: SQLite via `db.py` — `ra.db` stores domain_brief, insight, hypothesis, retrieval_batch, insight_embedding. Schema auto-migrates on CLI startup. No content storage — content lives in `kb.db`.
+- **LLM**: Anthropic Claude via `llm.py` — centralized client with JSON parsing, Pydantic validation, and retry-with-backoff.
+- **Schemas**: Pydantic v2 models in `schemas.py`. Hypothesis includes corpus fields: `supporting_insight_ids`, `contradicting_insight_ids`, `source_coverage`, `synthesis_note`.
+- **Contracts**: `contracts.py` — domain registry loading and test_definition validation.
+- **Stages**: `stages/orient.py`, `stages/retrieve.py`, `stages/distill.py`, `stages/translate.py`, `stages/migrate.py`.
+- **Insight embedding**: `insight_embedder.py` — embeds insights to `insights_<domain>` chroma collection for semantic retrieval in Translate.
+- **KB reader**: `kb_reader.py` — read-only access to `kb.db` and ChromaDB. No imports from knowledge-base package.
+- **Prompts**: Plain text templates in `prompts/` with `{placeholder}` substitution.
 
-## MVP Scope
+## Data Ownership
 
-Only YouTube ingestion is implemented. Other extractors (Substack, web article, PDF, email) are deferred per the build spec. Dedup uses naive name matching; embedding-based dedup is deferred.
+- **knowledge-base owns content**: `content_item`, raw text, chunks, embeddings live in `kb.db` and chroma.
+- **research-assistant owns research artifacts**: `domain_brief`, `insight`, `hypothesis`, provenance in `ra.db`.
+- **Insights are dual-written**: `ra.db` (source of truth) + chroma `insights_<domain>` (searchable index for Translate).
+
+## Pipeline Flow
+
+1. `kb ingest url|file|batch` — ingest content into knowledge-base (run separately)
+2. `ra orient` — build domain brief
+3. `ra retrieve` — select kb content for distillation, writes retrieval_batch
+4. `ra distill` — process pending batch items, extract insights, embed to chroma
+5. `ra translate` — corpus-aware hypothesis generation via semantic retrieval over insights
+6. `ra export` — Contract 1 JSON for factor-research

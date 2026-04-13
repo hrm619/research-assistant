@@ -15,6 +15,7 @@ dependencies = [
     "openpyxl",
     "requests",
     "python-dotenv",
+    "chromadb",
     "pytest",
     "yt-transcriber @ git+https://github.com/hrm619/yt_transcriber.git",
 ]

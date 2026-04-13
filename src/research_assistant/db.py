@@ -12,36 +12,11 @@ CREATE TABLE IF NOT EXISTS domain_brief (
     status TEXT NOT NULL DEFAULT 'draft'
 );
 
-CREATE TABLE IF NOT EXISTS source (
-    source_id TEXT PRIMARY KEY,
-    source_type TEXT NOT NULL,
-    url TEXT NOT NULL,
-    author TEXT NOT NULL,
-    domain_id TEXT NOT NULL REFERENCES domain_brief(domain_id),
-    trust_tier TEXT NOT NULL,
-    added_at TEXT NOT NULL,
-    active INTEGER NOT NULL DEFAULT 1
-);
-
-CREATE TABLE IF NOT EXISTS content_item (
-    content_id TEXT PRIMARY KEY,
-    source_id TEXT NOT NULL REFERENCES source(source_id),
-    ingested_at TEXT NOT NULL,
-    content_type TEXT NOT NULL,
-    title TEXT NOT NULL,
-    author TEXT NOT NULL,
-    published_at TEXT,
-    raw_text TEXT NOT NULL,
-    word_count INTEGER NOT NULL,
-    format_metadata TEXT NOT NULL,
-    processing_status TEXT NOT NULL,
-    error_detail TEXT
-);
-
 CREATE TABLE IF NOT EXISTS insight (
     insight_id TEXT PRIMARY KEY,
-    content_id TEXT NOT NULL REFERENCES content_item(content_id),
-    source_id TEXT NOT NULL REFERENCES source(source_id),
+    content_id TEXT NOT NULL,
+    content_item_ref TEXT DEFAULT '',
+    source_id TEXT NOT NULL DEFAULT '',
     domain_id TEXT NOT NULL REFERENCES domain_brief(domain_id),
     extracted_at TEXT NOT NULL,
     insight_type TEXT NOT NULL,
@@ -49,7 +24,10 @@ CREATE TABLE IF NOT EXISTS insight (
     claim_json TEXT,
     source_quote_ref TEXT NOT NULL,
     operator_note TEXT,
-    status TEXT NOT NULL DEFAULT 'active'
+    status TEXT NOT NULL DEFAULT 'active',
+    analyst TEXT DEFAULT '',
+    trust_tier TEXT DEFAULT '',
+    content_source TEXT DEFAULT 'ra'
 );
 
 CREATE TABLE IF NOT EXISTS hypothesis (
@@ -69,6 +47,34 @@ CREATE TABLE IF NOT EXISTS hypothesis_insight (
     insight_id TEXT NOT NULL REFERENCES insight(insight_id),
     PRIMARY KEY (hypothesis_id, insight_id)
 );
+
+CREATE TABLE IF NOT EXISTS retrieval_batch (
+    batch_id TEXT PRIMARY KEY,
+    domain TEXT NOT NULL,
+    content_item_ref TEXT NOT NULL,
+    analyst TEXT,
+    trust_tier TEXT,
+    source_type TEXT,
+    published_at TEXT,
+    retrieved_at TEXT NOT NULL,
+    distill_status TEXT NOT NULL DEFAULT 'pending'
+        CHECK(distill_status IN ('pending','distilled','skipped','failed')),
+    distill_error TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_retrieval_batch_domain_status
+    ON retrieval_batch(domain, distill_status);
+CREATE INDEX IF NOT EXISTS idx_retrieval_batch_domain_ref
+    ON retrieval_batch(domain, content_item_ref);
+
+CREATE TABLE IF NOT EXISTS insight_embedding (
+    insight_id TEXT PRIMARY KEY,
+    embedding_status TEXT NOT NULL DEFAULT 'pending'
+        CHECK(embedding_status IN ('pending','embedded','failed')),
+    chroma_collection TEXT,
+    last_embedded_at TEXT,
+    error TEXT
+);
 """
 
 
@@ -84,12 +90,49 @@ def get_connection(db_path: str = ":memory:") -> sqlite3.Connection:
 
 def migrate(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA_SQL)
+
     # Add test_definition_json column to existing hypothesis tables
     try:
         conn.execute("ALTER TABLE hypothesis ADD COLUMN test_definition_json TEXT")
         conn.commit()
     except sqlite3.OperationalError:
-        pass  # Column already exists
+        pass
+
+    # Legacy columns on insight (idempotent for pre-refactor databases)
+    for col, default in [
+        ("analyst", "''"),
+        ("trust_tier", "''"),
+        ("content_source", "'ra'"),
+        ("content_item_ref", "''"),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE insight ADD COLUMN {col} TEXT DEFAULT {default}")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
+
+    # Backfill content_item_ref from content_id for existing rows
+    try:
+        conn.execute(
+            "UPDATE insight SET content_item_ref = content_id "
+            "WHERE content_item_ref = '' AND content_id != ''"
+        )
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+
+    # Corpus synthesis columns on hypothesis
+    for col in [
+        "supporting_insight_ids",
+        "contradicting_insight_ids",
+        "source_coverage",
+        "synthesis_note",
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE hypothesis ADD COLUMN {col} TEXT")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
 
 
 def insert_row(conn: sqlite3.Connection, table: str, data: dict) -> str:

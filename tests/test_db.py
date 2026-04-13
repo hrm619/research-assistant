@@ -32,32 +32,18 @@ def _insert_domain(conn, domain_id="d1", domain_name="test_domain"):
     return domain_id
 
 
-def _insert_source(conn, source_id="s1", domain_id="d1"):
-    insert_row(conn, "source", {
-        "source_id": source_id,
-        "source_type": "youtube",
-        "url": "https://youtube.com/watch?v=test",
-        "author": "Test Author",
-        "domain_id": domain_id,
-        "trust_tier": "core",
-        "added_at": "2026-01-01T00:00:00Z",
-        "active": 1,
-    })
-    return source_id
-
-
 class TestMigration:
     def test_creates_all_tables(self, conn):
         tables = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
         ).fetchall()
         table_names = sorted(r["name"] for r in tables)
-        assert "content_item" in table_names
         assert "domain_brief" in table_names
         assert "hypothesis" in table_names
         assert "hypothesis_insight" in table_names
         assert "insight" in table_names
-        assert "source" in table_names
+        assert "retrieval_batch" in table_names
+        assert "insight_embedding" in table_names
 
     def test_idempotent(self, conn):
         migrate(conn)
@@ -66,6 +52,14 @@ class TestMigration:
             "SELECT name FROM sqlite_master WHERE type='table'"
         ).fetchall()
         assert len([r for r in tables if r["name"] == "domain_brief"]) == 1
+
+    def test_no_legacy_tables(self, conn):
+        tables = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+        table_names = {r["name"] for r in tables}
+        assert "content_item" not in table_names
+        assert "source" not in table_names
 
 
 class TestCRUD:
@@ -97,18 +91,6 @@ class TestCRUD:
         update_row(conn, "domain_brief", "domain_id", "d1", {"status": "active"})
         row = get_row(conn, "domain_brief", "domain_id", "d1")
         assert row["status"] == "active"
-
-
-class TestForeignKeys:
-    def test_source_requires_valid_domain(self, conn):
-        with pytest.raises(sqlite3.IntegrityError):
-            _insert_source(conn, domain_id="nonexistent")
-
-    def test_source_with_valid_domain(self, conn):
-        _insert_domain(conn)
-        _insert_source(conn)
-        row = get_row(conn, "source", "source_id", "s1")
-        assert row is not None
 
 
 class TestResolveDomain:
