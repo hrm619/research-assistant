@@ -4,7 +4,7 @@ import sqlite3
 import click
 
 from research_assistant.config import Settings, get_settings, setup_logging
-from research_assistant.db import get_connection, list_rows, migrate, resolve_domain
+from research_assistant.db import get_connection, list_rows, migrate as db_migrate, resolve_domain
 from research_assistant.schemas import OperatorContext, OrientInput
 
 
@@ -27,7 +27,7 @@ def cli(ctx):
     settings = get_settings()
     setup_logging(settings)
     conn = get_connection(settings.db_path)
-    migrate(conn)
+    db_migrate(conn)
     ctx.obj = AppContext(settings, conn)
 
 
@@ -67,96 +67,169 @@ def orient(app, domain, market, known_domains, seed_questions, seed_sources):
 
 
 @cli.command()
-@click.option("--url", required=True, help="Source URL")
-@click.option("--domain", required=True, help="Domain ID or name")
-@click.option("--trust-tier", type=click.Choice(["core", "supplementary", "exploratory"]), default="supplementary")
-@click.option("--author", default=None, help="Source author (auto-detected if omitted)")
+@click.option("--domain", required=True, help="Domain name (matches kb.db content_record.domain)")
+@click.option("--trust-tier", default=None, help="Comma-separated trust tiers (core,supplementary,exploratory)")
+@click.option("--analyst", default=None, help="Comma-separated analyst names")
+@click.option("--source-type", default=None, help="Comma-separated source types (youtube,article,web,pdf)")
+@click.option("--since", default=None, help="Published after (YYYY-MM-DD)")
+@click.option("--until", "until_date", default=None, help="Published before (YYYY-MM-DD)")
+@click.option("--limit", default=None, type=int, help="Max items to retrieve")
+@click.option("--dry-run", is_flag=True, help="Preview matched content without writing")
+@click.option("--force", is_flag=True, help="Include already-distilled items")
 @pass_app
-def ingest(app, url, domain, trust_tier, author):
-    """Register and ingest a source."""
-    from research_assistant.extractors.youtube import detect_source_type
-    from research_assistant.stages.ingest import ingest_content, register_source
+def retrieve(app, domain, trust_tier, analyst, source_type, since, until_date, limit, dry_run, force):
+    """Select content from knowledge-base for distillation."""
+    from research_assistant.kb_reader import get_kb_connection
+    from research_assistant.stages.retrieve import run_retrieve
 
-    url = url.replace("\\", "")
-    source_type = detect_source_type(url)
-    click.echo(f"Detected source type: {source_type}")
+    kb_conn = get_kb_connection(app.settings.kb_db_path)
 
-    sid = register_source(
-        source_type=source_type,
-        url=url,
-        author=author or "Unknown",
-        domain_id=domain,
-        trust_tier=trust_tier,
-        conn=app.conn,
+    trust_tiers = [t.strip() for t in trust_tier.split(",") if t.strip()] if trust_tier else None
+    analysts = [a.strip() for a in analyst.split(",") if a.strip()] if analyst else None
+    source_types = [s.strip() for s in source_type.split(",") if s.strip()] if source_type else None
+
+    matched = run_retrieve(
+        kb_conn=kb_conn,
+        ra_conn=app.conn,
+        domain=domain,
+        trust_tiers=trust_tiers,
+        analysts=analysts,
+        source_types=source_types,
+        since=since,
+        until=until_date,
+        limit=limit,
+        force=force,
+        dry_run=dry_run,
     )
 
-    click.echo(f"Ingesting content from {url}...")
-    content = ingest_content(sid, app.conn, app.settings)
+    if dry_run:
+        click.echo(click.style(f"[dry-run] {len(matched)} content items matched:", fg="yellow"))
+    else:
+        click.echo(click.style(f"Retrieved {len(matched)} content items into batch:", fg="green"))
 
-    status_color = {"success": "green", "partial": "yellow", "failed": "red"}
-    click.echo(click.style(
-        f"Status: {content.processing_status}", fg=status_color.get(content.processing_status, "white"),
-    ))
-    click.echo(f"Title: {content.title}")
-    click.echo(f"Words: {content.word_count}")
-    if content.error_detail:
-        click.echo(click.style(f"Error: {content.error_detail}", fg="yellow"))
+    for item in matched:
+        tier_badge = click.style(f"[{item.get('trust_tier', '?')}]", fg="cyan")
+        click.echo(f"  {tier_badge} {item['content_id'][:12]}... {item.get('analyst', '?')} — {item.get('title', 'untitled')}")
 
-
-@cli.command("ingest-batch")
-@click.option("--source-file", required=True, type=click.Path(exists=True), help="JSON file with source list")
-@click.option("--domain", required=True, help="Domain ID or name")
-@pass_app
-def ingest_batch(app, source_file, domain):
-    """Batch ingest from a source list file."""
-    from research_assistant.stages.ingest import ingest_batch as _ingest_batch
-
-    click.echo(f"Batch ingesting from {source_file}...")
-    results = _ingest_batch(source_file, domain, app.conn, app.settings)
-    success = sum(1 for r in results if r.processing_status == "success")
-    click.echo(f"Ingested {len(results)} sources ({success} successful)")
+    if not matched:
+        click.echo("No matching content found in kb.db.")
 
 
 @cli.command()
 @click.option("--domain", required=True, help="Domain ID or name")
 @click.option("--mode", type=click.Choice(["framework", "claim", "both"]), default="both")
-@click.option("--content-id", default=None, help="Specific content ID to distill")
 @click.option("--focus", default=None, help="Operator focus area")
+@click.option("--from-kb", is_flag=True, help="Read all KB content directly (bypasses retrieval batch)")
+@click.option("--kb-content-id", default=None, help="Specific KB content ID to distill directly")
+@click.option("--kb-domain", default=None, help="KB collection name (defaults to --domain)")
+@click.option("--batch-id", default=None, help="Specific retrieval batch ID to distill")
+@click.option("--limit", "distill_limit", default=None, type=int, help="Max batch items to distill")
 @pass_app
-def distill(app, domain, mode, content_id, focus):
-    """Extract expert reasoning frameworks from ingested content."""
-    from research_assistant.stages.distill import list_insights, run_distill, save_insights
-    from research_assistant.stages.ingest import list_content
+def distill(app, domain, mode, focus, from_kb, kb_content_id, kb_domain, batch_id, distill_limit):
+    """Extract expert reasoning frameworks from content.
 
-    if content_id:
-        content_ids = [content_id]
-    else:
-        # Distill all content for the domain, skipping failed ingestions
-        content_rows = list_content(domain, app.conn)
-        content_ids = [
-            r["content_id"] for r in content_rows
-            if r.get("processing_status") == "success" and r.get("word_count", 0) > 0
-        ]
+    Default: processes pending items from the most recent retrieval batch.
+    Use --from-kb to read all KB content directly (bypasses batch).
+    Use --kb-content-id for a specific KB content item.
+    """
+    from research_assistant.stages.distill import KBContext, run_distill, run_distill_batch, save_insights
 
-    if not content_ids:
-        click.echo("No content found to distill.")
+    # Direct KB path: --from-kb or --kb-content-id
+    if from_kb or kb_content_id:
+        from research_assistant.kb_reader import get_chroma_client, get_kb_connection, list_kb_content
+
+        collection_name = kb_domain or domain
+        kb_conn = get_kb_connection(app.settings.kb_db_path)
+        chroma_client = get_chroma_client(app.settings.chroma_persist_dir)
+        kb_context = KBContext(kb_conn=kb_conn, chroma_client=chroma_client, collection_name=collection_name)
+
+        if kb_content_id:
+            content_ids = [kb_content_id]
+        else:
+            content_rows = list_kb_content(kb_conn, collection_name)
+            content_ids = [r["content_id"] for r in content_rows if r.get("word_count", 0) > 0]
+            click.echo(f"Found {len(content_ids)} content items in KB collection '{collection_name}'")
+
+        if not content_ids:
+            click.echo("No content found to distill.")
+            return
+
+        total_insights = []
+        for cid in content_ids:
+            click.echo(f"Distilling content {cid}...")
+            try:
+                insights = run_distill(cid, domain, mode, focus, app.conn, app.settings, kb_context=kb_context)
+                ids = save_insights(insights, app.conn)
+                total_insights.extend(ids)
+                click.echo(f"  Extracted {len(ids)} insights")
+            except Exception as e:
+                click.echo(click.style(f"  Error: {e}", fg="red"))
+
+        click.echo(click.style(f"Total: {len(total_insights)} insights saved", fg="green"))
         return
 
-    total_insights = []
-    for cid in content_ids:
-        click.echo(f"Distilling content {cid}...")
-        insights = run_distill(cid, domain, mode, focus, app.conn, app.settings)
-        ids = save_insights(insights, app.conn)
-        total_insights.extend(ids)
-        click.echo(f"  Extracted {len(ids)} insights")
+    # Batch-driven path: process pending retrieval_batch rows
+    from research_assistant.kb_reader import get_chroma_client, get_kb_connection
 
-    click.echo(click.style(f"Total: {len(total_insights)} insights saved", fg="green"))
+    kb_conn = get_kb_connection(app.settings.kb_db_path)
+    chroma_client = get_chroma_client(app.settings.chroma_persist_dir)
+
+    openai_client = None
+    if app.settings.openai_api_key:
+        import openai
+        openai_client = openai.OpenAI(api_key=app.settings.openai_api_key)
+
+    click.echo(f"Distilling pending batch items for domain '{domain}'...")
+    insights = run_distill_batch(
+        domain=domain,
+        mode=mode,
+        focus=focus,
+        conn=app.conn,
+        settings=app.settings,
+        kb_conn=kb_conn,
+        chroma_client=chroma_client,
+        batch_id=batch_id,
+        limit=distill_limit,
+        openai_client=openai_client,
+    )
+
+    if openai_client:
+        from research_assistant.db import list_rows as _list_rows
+        failed = _list_rows(app.conn, "insight_embedding", {"embedding_status": "failed"})
+        if failed:
+            click.echo(click.style(f"  {len(failed)} insights failed to embed (run 'ra reembed')", fg="yellow"))
+
+    click.echo(click.style(f"Total: {len(insights)} insights extracted from batch", fg="green"))
+
+
+@cli.command()
+@click.option("--domain", required=True, help="Domain name")
+@pass_app
+def reembed(app, domain):
+    """Retry failed or pending insight embeddings for a domain."""
+    import openai as openai_mod
+    from research_assistant.insight_embedder import reembed_failed
+    from research_assistant.kb_reader import get_chroma_client
+
+    if not app.settings.openai_api_key:
+        click.echo(click.style("OPENAI_API_KEY required for embedding.", fg="red"))
+        raise SystemExit(1)
+
+    openai_client = openai_mod.OpenAI(api_key=app.settings.openai_api_key)
+    chroma_client = get_chroma_client(app.settings.chroma_persist_dir)
+
+    click.echo(f"Re-embedding failed/pending insights for domain '{domain}'...")
+    success, failed = reembed_failed(domain, app.conn, chroma_client, openai_client, app.settings)
+    click.echo(click.style(f"Embedded: {success}, Failed: {failed}", fg="green" if failed == 0 else "yellow"))
 
 
 @cli.command()
 @click.option("--domain", required=True, help="Domain ID or name")
 @click.option("--mode", type=click.Choice(["explore", "commit"]), default="explore")
-@click.option("--insight-id", multiple=True, help="Specific insight IDs to translate")
+@click.option("--insight-id", multiple=True, help="Specific insight IDs to translate (legacy, non-corpus)")
+@click.option("--seed-insight-id", default=None, help="Seed insight for corpus-aware translation")
+@click.option("--corpus-k", default=15, type=int, help="Number of corpus insights to retrieve per seed")
+@click.option("--include-exploratory", is_flag=True, help="Include exploratory trust tier in corpus retrieval")
 @click.option("--markets", default="", help="Comma-separated accessible markets")
 @click.option("--data-sources", default="", help="Comma-separated available data sources")
 @click.option(
@@ -164,50 +237,94 @@ def distill(app, domain, mode, content_id, focus):
     help="Path to domain registry JSON for test_definition generation",
 )
 @pass_app
-def translate(app, domain, mode, insight_id, markets, data_sources, domain_registry):
-    """Convert insights into testable hypothesis definitions."""
+def translate(app, domain, mode, insight_id, seed_insight_id, corpus_k,
+              include_exploratory, markets, data_sources, domain_registry):
+    """Convert insights into testable hypothesis definitions.
+
+    Default: corpus-aware translation. Selects seed insights and retrieves
+    related insights from chroma for multi-source synthesis.
+
+    Use --insight-id for legacy single-batch translation without corpus.
+    Use --seed-insight-id to anchor on a specific insight.
+    """
     from pathlib import Path
 
-    from research_assistant.stages.distill import list_insights
     from research_assistant.stages.translate import (
         assess_feasibility,
         run_translate,
+        run_translate_corpus,
         save_hypotheses,
+        select_seed_insights,
     )
-
-    if insight_id:
-        iids = list(insight_id)
-    else:
-        rows = list_insights(domain, app.conn, {"status": "active"})
-        iids = [r["insight_id"] for r in rows]
-
-    if not iids:
-        click.echo("No insights found to translate.")
-        return
 
     op_context = OperatorContext(
         accessible_markets=[m.strip() for m in markets.split(",") if m.strip()],
         available_data_sources=[d.strip() for d in data_sources.split(",") if d.strip()],
     )
-
     registry_path = Path(domain_registry) if domain_registry else None
 
-    click.echo(f"Translating {len(iids)} insights in {mode} mode...")
+    # Legacy path: --insight-id explicitly passed
+    if insight_id:
+        from research_assistant.stages.distill import list_insights
+
+        iids = list(insight_id)
+        click.echo(f"Translating {len(iids)} insights in {mode} mode (legacy)...")
+        hypotheses = run_translate(
+            iids, domain, mode, op_context, app.conn, app.settings,
+            domain_registry_path=registry_path,
+        )
+        for h in hypotheses:
+            assess_feasibility(h, op_context)
+        ids = save_hypotheses(hypotheses, iids, app.conn)
+        click.echo(click.style(f"Generated {len(ids)} hypotheses", fg="green"))
+        for h in hypotheses:
+            has_test_def = " [+test_definition]" if h.test_definition else ""
+            click.echo(f"  - {h.definition.name} (testability: {h.feasibility.estimated_testability}){has_test_def}")
+        return
+
+    # Corpus-aware path
+    from research_assistant.kb_reader import get_chroma_client
+    chroma_client = get_chroma_client(app.settings.chroma_persist_dir)
+
+    if seed_insight_id:
+        seed_ids = [seed_insight_id]
+    else:
+        seed_ids = select_seed_insights(domain, app.conn)
+        if not seed_ids:
+            click.echo("No seed insights found to translate.")
+            return
+
+    click.echo(f"Translating {len(seed_ids)} seed insights in {mode} mode (corpus-aware)...")
     if registry_path:
         click.echo(f"Using domain registry: {registry_path}")
-    hypotheses = run_translate(
-        iids, domain, mode, op_context, app.conn, app.settings,
-        domain_registry_path=registry_path,
-    )
 
-    for h in hypotheses:
-        assess_feasibility(h, op_context)
+    all_hypotheses = []
+    for sid in seed_ids:
+        click.echo(f"  Seed: {sid[:12]}...")
+        try:
+            hypotheses = run_translate_corpus(
+                seed_insight_id=sid,
+                domain_id=domain,
+                mode=mode,
+                operator_context=op_context,
+                conn=app.conn,
+                settings=app.settings,
+                chroma_client=chroma_client,
+                corpus_k=corpus_k,
+                include_exploratory=include_exploratory,
+                domain_registry_path=registry_path,
+            )
+            for h in hypotheses:
+                assess_feasibility(h, op_context)
+            ids = save_hypotheses(hypotheses, [sid], app.conn)
+            all_hypotheses.extend(hypotheses)
+            for h in hypotheses:
+                coverage = f" [{h.source_coverage.n_sources} sources]" if h.source_coverage else ""
+                click.echo(f"    → {h.definition.name}{coverage}")
+        except Exception as e:
+            click.echo(click.style(f"    Error: {e}", fg="red"))
 
-    ids = save_hypotheses(hypotheses, iids, app.conn)
-    click.echo(click.style(f"Generated {len(ids)} hypotheses", fg="green"))
-    for h in hypotheses:
-        has_test_def = " [+test_definition]" if h.test_definition else ""
-        click.echo(f"  - {h.definition.name} (testability: {h.feasibility.estimated_testability}){has_test_def}")
+    click.echo(click.style(f"Total: {len(all_hypotheses)} hypotheses generated", fg="green"))
 
 
 @cli.group()
@@ -430,23 +547,17 @@ def status(app, domain):
     click.echo(f"Status: {brief['status']}")
     click.echo()
 
-    sources = list_rows(app.conn, "source", {"domain_id": resolved})
-    click.echo(f"Sources: {len(sources)}")
-    for tier in ("core", "supplementary", "exploratory"):
-        count = sum(1 for s in sources if s["trust_tier"] == tier)
-        if count:
-            click.echo(f"  {tier}: {count}")
-
-    content = app.conn.execute(
-        "SELECT processing_status, COUNT(*) as cnt FROM content_item ci "
-        "JOIN source s ON ci.source_id = s.source_id "
-        "WHERE s.domain_id = ? GROUP BY processing_status",
-        (resolved,),
+    domain_name = brief["domain_name"]
+    batch_rows = app.conn.execute(
+        "SELECT distill_status, COUNT(*) as cnt FROM retrieval_batch "
+        "WHERE domain = ? GROUP BY distill_status",
+        (domain_name,),
     ).fetchall()
-    total_content = sum(r["cnt"] for r in content)
-    click.echo(f"\nContent items: {total_content}")
-    for r in content:
-        click.echo(f"  {r['processing_status']}: {r['cnt']}")
+    total_batch = sum(r["cnt"] for r in batch_rows)
+    if total_batch:
+        click.echo(f"\nRetrieval batch (from kb): {total_batch}")
+        for r in batch_rows:
+            click.echo(f"  {r['distill_status']}: {r['cnt']}")
 
     insights = list_rows(app.conn, "insight", {"domain_id": resolved})
     click.echo(f"\nInsights: {len(insights)}")
@@ -573,3 +684,58 @@ def export(app, hypothesis_id, fmt, domain_registry, output):
         click.echo(click.style(f"Contract 1 written to {output_path}", fg="green"))
     else:
         click.echo(json.dumps(result, indent=2))
+
+
+@cli.group()
+def migrate():
+    """Database migration commands."""
+    pass
+
+
+@migrate.command("to-kb-ownership")
+@click.option("--dry-run", is_flag=True, help="Preview changes without modifying the database")
+@pass_app
+def migrate_to_kb(app, dry_run):
+    """Migrate ra.db to kb-ownership model.
+
+    Backs up ra.db, remaps insight references, drops content_item and source tables.
+    Run with --dry-run first to preview changes.
+    """
+    from research_assistant.stages.migrate import run_migration
+
+    kb_conn = None
+    try:
+        from research_assistant.kb_reader import get_kb_connection
+        kb_conn = get_kb_connection(app.settings.kb_db_path)
+    except FileNotFoundError:
+        click.echo(click.style("Warning: kb.db not found. Content matching will be skipped.", fg="yellow"))
+
+    report = run_migration(app.conn, kb_conn, app.settings.db_path, dry_run=dry_run)
+
+    if dry_run:
+        click.echo(click.style("[dry-run] Migration preview:", fg="yellow"))
+    else:
+        click.echo(click.style("Migration complete.", fg="green"))
+        if report["backup_path"]:
+            click.echo(f"Backup: {report['backup_path']}")
+
+    unmatched = report["unmatched_content"]
+    if unmatched:
+        click.echo(f"\nUnmatched content items ({len(unmatched)}):")
+        click.echo("  These exist in ra.db but not in kb.db. Re-ingest via 'kb ingest'.")
+        for item in unmatched[:10]:
+            click.echo(f"  - {item['content_id'][:12]}... {item.get('title', 'untitled')}")
+        if len(unmatched) > 10:
+            click.echo(f"  ... and {len(unmatched) - 10} more")
+    else:
+        click.echo("\nAll content matched or no content_item table found.")
+
+    if not dry_run:
+        stats = report["remap_stats"]
+        click.echo(f"\nInsight remapping: {stats.get('remapped', 0)} remapped, "
+                    f"{stats.get('already_set', 0)} already set, "
+                    f"{stats.get('orphaned', 0)} orphaned")
+        click.echo(f"Dropped tables: {', '.join(report['dropped_tables']) or 'none'}")
+
+    if not dry_run:
+        click.echo(f"\nRollback: cp {report.get('backup_path', '<backup>')} {app.settings.db_path}")

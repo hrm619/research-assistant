@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
 
     openai_api_key: str = ""
+    insight_embedding_model: str = "text-embedding-3-small"
+
+    kb_db_path: str = str(Path.home() / ".knowledge-base" / "kb.db")
+    chroma_persist_dir: str = str(Path.home() / ".knowledge-base" / "chroma")
 
     contracts_dir: str = str(Path.home() / ".fin-arb" / "contracts")
     domain_registry_path: str = ""
